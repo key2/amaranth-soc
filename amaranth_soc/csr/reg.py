@@ -802,7 +802,7 @@ class Bridge(wiring.Component):
 
         m.submodules.mux = self._mux
         for reg, reg_name, _ in self.bus.memory_map.resources():
-            m.submodules["__".join(reg_name)] = reg
+            m.submodules["__".join(str(name) for name in reg_name)] = reg
 
         connect(m, flipped(self.bus), self._mux.bus)
 
