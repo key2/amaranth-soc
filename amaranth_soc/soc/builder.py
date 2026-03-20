@@ -41,6 +41,7 @@ class SoCBuilder:
     """
 
     def __init__(self, *, bus_standard, bus_addr_width, bus_data_width,
+                 bus_granularity=None, bus_features=frozenset(),
                  csr_data_width=8, csr_addr_width=14, n_irqs=32):
         if not isinstance(bus_standard, BusStandard):
             raise TypeError(f"bus_standard must be a BusStandard, not {bus_standard!r}")
@@ -52,6 +53,8 @@ class SoCBuilder:
         self._bus_standard = bus_standard
         self._bus_addr_width = bus_addr_width
         self._bus_data_width = bus_data_width
+        self._bus_granularity = bus_granularity
+        self._bus_features = frozenset(bus_features)
         self._csr_data_width = csr_data_width
         self._csr_addr_width = csr_addr_width
         self._n_irqs = n_irqs
@@ -79,6 +82,14 @@ class SoCBuilder:
     @property
     def csr_addr_width(self):
         return self._csr_addr_width
+
+    @property
+    def bus_granularity(self):
+        return self._bus_granularity
+
+    @property
+    def bus_features(self):
+        return self._bus_features
 
     @property
     def n_irqs(self):
@@ -187,6 +198,8 @@ class SoC(wiring.Component):
         self._bus_standard = builder.bus_standard
         self._bus_addr_width = builder.bus_addr_width
         self._bus_data_width = builder.bus_data_width
+        self._bus_granularity = builder.bus_granularity
+        self._bus_features = builder.bus_features
         self._csr_data_width = builder.csr_data_width
         self._csr_addr_width = builder.csr_addr_width
         self._n_irqs = builder.n_irqs
@@ -204,6 +217,8 @@ class SoC(wiring.Component):
             self._bus_handler = WishboneBusHandler(
                 addr_width=self._bus_addr_width,
                 data_width=self._bus_data_width,
+                granularity=self._bus_granularity,
+                features=self._bus_features,
             )
         else:
             raise NotImplementedError(
