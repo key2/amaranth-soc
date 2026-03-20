@@ -1,7 +1,31 @@
 # Project metadata
 
+
 [tool.pdm.version]
 source = "scm"
+
+[tool.pdm.dev-dependencies]
+test = [
+  "coverage",
+]
+docs = [
+  "sphinx~=7.1",
+  "sphinx-rtd-theme~=1.2",
+  "sphinx-autobuild",
+]
+
+[tool.pdm.scripts]
+test.composite = ["test-code"]
+# TODO: Once the amaranth requirement is bumped to 0.6, remove the RFC 66 warning filter and fix the deprecations.
+test-code.env = {PYTHONWARNINGS = "error,ignore:Per RFC 66,:DeprecationWarning"}
+test-code.cmd = "python -m coverage run -m unittest discover -t . -s tests -v"
+test-docs.cmd = "sphinx-build -b doctest docs docs/_build"
+
+document.cmd = "sphinx-build docs docs/_build"
+document-live.cmd = "sphinx-autobuild docs docs/_build --watch amaranth_soc"
+
+coverage-text.cmd = "python -m coverage report"
+coverage-html.cmd = "python -m coverage html"
 
 [project]
 dynamic = ["version"]
@@ -31,25 +55,8 @@ build-backend = "pdm.backend"
 
 # Development workflow configuration
 
-[tool.pdm.dev-dependencies]
-test = [
-  "coverage",
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
 ]
-docs = [
-  "sphinx~=7.1",
-  "sphinx-rtd-theme~=1.2",
-  "sphinx-autobuild",
-]
-
-[tool.pdm.scripts]
-test.composite = ["test-code"]
-# TODO: Once the amaranth requirement is bumped to 0.6, remove the RFC 66 warning filter and fix the deprecations.
-test-code.env = {PYTHONWARNINGS = "error,ignore:Per RFC 66,:DeprecationWarning"}
-test-code.cmd = "python -m coverage run -m unittest discover -t . -s tests -v"
-test-docs.cmd = "sphinx-build -b doctest docs docs/_build"
-
-document.cmd = "sphinx-build docs docs/_build"
-document-live.cmd = "sphinx-autobuild docs docs/_build --watch amaranth_soc"
-
-coverage-text.cmd = "python -m coverage report"
-coverage-html.cmd = "python -m coverage html"

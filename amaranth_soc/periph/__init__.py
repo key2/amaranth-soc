@@ -3,11 +3,12 @@ from collections.abc import Mapping
 
 from amaranth.utils import bits_for
 
-from .memory import MemoryMap
-from . import event
+from ..memory import MemoryMap
+from .. import event
 
 
-__all__ = ["ConstantValue", "ConstantBool", "ConstantInt", "ConstantMap", "PeripheralInfo"]
+__all__ = ["ConstantValue", "ConstantBool", "ConstantInt", "ConstantMap", "PeripheralInfo",
+           "TimerPeripheral", "InterruptController"]
 
 
 class ConstantValue:
@@ -191,3 +192,8 @@ class PeripheralInfo:
         A :class:`ConstantMap` containing configuration constants of the peripheral.
         """
         return self._constant_map
+
+
+# Import new peripheral components
+from .timer import TimerPeripheral
+from .intc import InterruptController
