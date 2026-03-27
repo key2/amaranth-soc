@@ -1057,3 +1057,89 @@ class BridgeTestCase(unittest.TestCase):
         sim.add_testbench(testbench)
         with sim.write_vcd(vcd_file="test.vcd"):
             sim.run()
+
+    def test_ownership_default(self):
+        regs = Builder(addr_width=16, data_width=8)
+        regs.add("reg0", self._RWRegister(8))
+        bridge = Bridge(regs.as_memory_map())
+        self.assertEqual(bridge.ownership, "owned")
+
+    def test_ownership_external(self):
+        regs = Builder(addr_width=16, data_width=8)
+        regs.add("reg0", self._RWRegister(8))
+        bridge = Bridge(regs.as_memory_map(), ownership="external")
+        self.assertEqual(bridge.ownership, "external")
+
+    def test_ownership_wrong(self):
+        regs = Builder(addr_width=16, data_width=8)
+        regs.add("reg0", self._RWRegister(8))
+        with self.assertRaisesRegex(ValueError,
+                r"ownership must be 'owned' or 'external', not 'foo'"):
+            Bridge(regs.as_memory_map(), ownership="foo")
+
+    def test_sim_external_ownership(self):
+        """Test that ownership='external' allows a register to be owned by another component
+        while still being accessible through the Bridge's CSR bus."""
+
+        # Create a register
+        reg_rw_8 = self._RWRegister(8, init=0x42)
+
+        # Build a memory map containing the register
+        regs = Builder(addr_width=16, data_width=8)
+        regs.add("reg_rw_8", reg_rw_8)
+
+        # Create a Bridge with external ownership — it will NOT add the register as a submodule
+        bridge = Bridge(regs.as_memory_map(), ownership="external")
+
+        # Create a "peripheral" component that owns the register
+        class Peripheral(wiring.Component):
+            def __init__(self, reg):
+                self._reg = reg
+                super().__init__({})
+
+            def elaborate(self, platform):
+                m = Module()
+                m.submodules.my_reg = self._reg
+                return m
+
+        peripheral = Peripheral(reg_rw_8)
+
+        # Create a top-level module that adds both the peripheral and the bridge.
+        # If Bridge tried to add the register as a submodule too, this would raise
+        # DuplicateElaboratable.
+        top = Module()
+        top.submodules.peripheral = peripheral
+        top.submodules.bridge = bridge
+
+        async def testbench(ctx):
+            # Read the initial value at address 0
+            ctx.set(bridge.bus.addr, 0)
+            ctx.set(bridge.bus.r_stb, 1)
+            ctx.set(bridge.bus.w_stb, 0)
+            await ctx.tick()
+            self.assertEqual(ctx.get(bridge.bus.r_data), 0x42)
+            ctx.set(bridge.bus.r_stb, 0)
+
+            # Write 0xAB to address 0
+            ctx.set(bridge.bus.addr, 0)
+            ctx.set(bridge.bus.w_stb, 1)
+            ctx.set(bridge.bus.w_data, 0xAB)
+            await ctx.tick()
+            ctx.set(bridge.bus.w_stb, 0)
+            await ctx.tick()
+
+            # Read back the written value
+            ctx.set(bridge.bus.addr, 0)
+            ctx.set(bridge.bus.r_stb, 1)
+            await ctx.tick()
+            self.assertEqual(ctx.get(bridge.bus.r_data), 0xAB)
+            ctx.set(bridge.bus.r_stb, 0)
+
+            # Verify the register's internal field was updated
+            self.assertEqual(ctx.get(reg_rw_8.f.a.data), 0xAB)
+
+        sim = Simulator(top)
+        sim.add_clock(1e-6)
+        sim.add_testbench(testbench)
+        with sim.write_vcd(vcd_file="test.vcd"):
+            sim.run()

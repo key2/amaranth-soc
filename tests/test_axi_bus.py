@@ -1,10 +1,13 @@
 """Tests for AXI bus signatures and interfaces."""
 import unittest
+from amaranth.sim import Simulator
 from amaranth_soc.axi.bus import (
     AXIResp, AXIBurst, AXISize,
     AXI4LiteSignature, AXI4LiteInterface,
     AXI4Signature, AXI4Interface,
 )
+from amaranth_soc.axi.sram import AXI4LiteSRAM
+from amaranth_soc.sim.axi import axi_lite_write, axi_lite_read
 from amaranth_soc.memory import MemoryMap
 
 
@@ -45,9 +48,17 @@ class TestAXI4LiteSignature(unittest.TestCase):
         with self.assertRaises(ValueError):
             AXI4LiteSignature(addr_width=32, data_width=16)
 
-    def test_invalid_data_width_128(self):
+    def test_valid_data_width_128(self):
+        sig = AXI4LiteSignature(addr_width=32, data_width=128)
+        self.assertEqual(sig.data_width, 128)
+
+    def test_valid_data_width_256(self):
+        sig = AXI4LiteSignature(addr_width=32, data_width=256)
+        self.assertEqual(sig.data_width, 256)
+
+    def test_invalid_data_width_not_power_of_2(self):
         with self.assertRaises(ValueError):
-            AXI4LiteSignature(addr_width=32, data_width=128)
+            AXI4LiteSignature(addr_width=32, data_width=48)
 
     def test_invalid_addr_width_negative(self):
         with self.assertRaises(TypeError):
@@ -252,9 +263,16 @@ class TestAXI4Interface(unittest.TestCase):
         with self.assertRaises(AttributeError):
             _ = iface.memory_map
 
-    def test_memory_map_wrong_data_width(self):
+    def test_memory_map_byte_addressed(self):
+        """Memory map with data_width=8 (byte-addressable) is valid for AXI4."""
         iface = AXI4Interface(addr_width=16, data_width=32)
         mm = MemoryMap(addr_width=16, data_width=8)
+        iface.memory_map = mm
+        self.assertIs(iface.memory_map, mm)
+
+    def test_memory_map_wrong_data_width(self):
+        iface = AXI4Interface(addr_width=16, data_width=32)
+        mm = MemoryMap(addr_width=16, data_width=16)
         with self.assertRaises(ValueError):
             iface.memory_map = mm
 
@@ -262,6 +280,61 @@ class TestAXI4Interface(unittest.TestCase):
         iface = AXI4Interface(addr_width=32, data_width=32)
         r = repr(iface)
         self.assertIn("AXI4Interface", r)
+
+
+class TestAXI4LiteSRAM128Bit(unittest.TestCase):
+    """Simulation test for AXI4-Lite SRAM with 128-bit data width."""
+
+    def test_write_read_128bit(self):
+        """Create a 128-bit wide SRAM, write a 128-bit value, read it back."""
+        dut = AXI4LiteSRAM(size=64, data_width=128)
+
+        async def testbench(ctx):
+            bus = dut.bus
+            # 128-bit test value (fits in 128 bits)
+            test_value = 0xDEADBEEF_CAFEBABE_12345678_9ABCDEF0
+            # Write to address 0x00 (128-bit = 16 bytes per word)
+            await axi_lite_write(ctx, bus, 0x00, test_value)
+            # Read it back
+            data, resp = await axi_lite_read(ctx, bus, 0x00)
+            assert data == test_value, \
+                f"Expected {test_value:#034x}, got {data:#034x}"
+            assert resp == AXIResp.OKAY
+
+        sim = Simulator(dut)
+        sim.add_clock(1e-6)
+        sim.add_testbench(testbench)
+        with sim.write_vcd("tests/test_sram_128bit.vcd"):
+            sim.run()
+
+    def test_multiple_addresses_128bit(self):
+        """Write to multiple 128-bit addresses and read them back."""
+        dut = AXI4LiteSRAM(size=64, data_width=128)
+
+        async def testbench(ctx):
+            bus = dut.bus
+            # 64 bytes / 16 bytes per word = 4 words
+            test_data = {
+                0x00: 0x11111111_22222222_33333333_44444444,
+                0x10: 0xAAAAAAAA_BBBBBBBB_CCCCCCCC_DDDDDDDD,
+                0x20: 0xDEADBEEF_CAFEBABE_F00DCAFE_BEEFCAFE,
+                0x30: 0x00000000_00000000_00000000_00000001,
+            }
+            # Write all
+            for addr, data in test_data.items():
+                await axi_lite_write(ctx, bus, addr, data)
+            # Read all back
+            for addr, expected in test_data.items():
+                data, resp = await axi_lite_read(ctx, bus, addr)
+                assert data == expected, \
+                    f"At {addr:#06x}: expected {expected:#034x}, got {data:#034x}"
+                assert resp == AXIResp.OKAY
+
+        sim = Simulator(dut)
+        sim.add_clock(1e-6)
+        sim.add_testbench(testbench)
+        with sim.write_vcd("tests/test_sram_128bit_multi.vcd"):
+            sim.run()
 
 
 if __name__ == "__main__":

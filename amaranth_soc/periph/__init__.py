@@ -8,7 +8,7 @@ from .. import event
 
 
 __all__ = ["ConstantValue", "ConstantBool", "ConstantInt", "ConstantMap", "PeripheralInfo",
-           "TimerPeripheral", "InterruptController"]
+           "TimerPeripheral", "InterruptController", "MSIInterruptController"]
 
 
 class ConstantValue:
@@ -196,4 +196,4 @@ class PeripheralInfo:
 
 # Import new peripheral components
 from .timer import TimerPeripheral
-from .intc import InterruptController
+from .intc import InterruptController, MSIInterruptController

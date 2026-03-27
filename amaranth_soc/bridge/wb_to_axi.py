@@ -21,8 +21,8 @@ class WishboneToAXI4Lite(wiring.Component):
     ----------
     addr_width : int
         Address width in bits (Wishbone word address width).
-    data_width : int
-        Data width (32 or 64).
+    data_width : int, power of 2, >= 32
+        Data width. Must be a power of 2 and at least 32.
     granularity : int
         Wishbone granularity (default 8).
 
@@ -37,8 +37,10 @@ class WishboneToAXI4Lite(wiring.Component):
     def __init__(self, *, addr_width, data_width=32, granularity=8):
         if not isinstance(addr_width, int) or addr_width < 0:
             raise TypeError(f"Address width must be a non-negative integer, not {addr_width!r}")
-        if data_width not in (32, 64):
-            raise ValueError(f"Data width must be 32 or 64, not {data_width!r}")
+        if not isinstance(data_width, int) or data_width < 32:
+            raise ValueError(f"Data width must be a positive integer >= 32, not {data_width!r}")
+        if data_width & (data_width - 1) != 0:
+            raise ValueError(f"Data width must be a power of 2, not {data_width!r}")
         if granularity not in (8, 16, 32, 64):
             raise ValueError(f"Granularity must be one of 8, 16, 32, 64, not {granularity!r}")
         if granularity > data_width:

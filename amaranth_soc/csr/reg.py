@@ -765,6 +765,10 @@ class Bridge(wiring.Component):
     ----------
     memory_map : :class:`MemoryMap`
         Memory map of CSR registers.
+    ownership : :class:`str`
+        Register ownership mode. ``"owned"`` (default) causes the bridge to add each register as
+        a submodule during elaboration. ``"external"`` skips submodule addition, leaving the caller
+        responsible for elaborating the registers elsewhere.
 
     Interface attributes
     --------------------
@@ -779,8 +783,14 @@ class Bridge(wiring.Component):
         If ``memory_map`` has windows.
     :exc:`TypeError`
         If ``memory_map`` has resources that are not :class:`Register` objects.
+    :exc:`ValueError`
+        If ``ownership`` is not ``"owned"`` or ``"external"``.
     """
-    def __init__(self, memory_map):
+    def __init__(self, memory_map, *, ownership="owned"):
+        if ownership not in ("owned", "external"):
+            raise ValueError(f"ownership must be 'owned' or 'external', not {ownership!r}")
+        self._ownership = ownership
+
         if not isinstance(memory_map, MemoryMap):
             raise TypeError(f"CSR bridge memory map must be an instance of MemoryMap, not {memory_map!r}")
         if list(memory_map.windows()):
@@ -797,12 +807,17 @@ class Bridge(wiring.Component):
         })
         self.bus.memory_map = memory_map
 
+    @property
+    def ownership(self):
+        return self._ownership
+
     def elaborate(self, platform):
         m = Module()
 
         m.submodules.mux = self._mux
-        for reg, reg_name, _ in self.bus.memory_map.resources():
-            m.submodules["__".join(str(name) for name in reg_name)] = reg
+        if self._ownership == "owned":
+            for reg, reg_name, _ in self.bus.memory_map.resources():
+                m.submodules["__".join(str(name) for name in reg_name)] = reg
 
         connect(m, flipped(self.bus), self._mux.bus)
 

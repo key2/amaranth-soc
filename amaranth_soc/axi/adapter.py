@@ -22,8 +22,8 @@ class AXI4ToAXI4Lite(wiring.Component):
     ----------
     addr_width : int
         Address width.
-    data_width : int
-        Data width (32 or 64).
+    data_width : int, power of 2, >= 32
+        Data width. Must be a power of 2 and at least 32.
     id_width : int
         AXI4 ID width (for the upstream port).
 
@@ -38,8 +38,10 @@ class AXI4ToAXI4Lite(wiring.Component):
     def __init__(self, *, addr_width, data_width=32, id_width=4):
         if not isinstance(addr_width, int) or addr_width < 1:
             raise TypeError(f"Address width must be a positive integer, not {addr_width!r}")
-        if data_width not in (32, 64):
-            raise ValueError(f"Data width must be 32 or 64, not {data_width!r}")
+        if not isinstance(data_width, int) or data_width < 32:
+            raise ValueError(f"Data width must be a positive integer >= 32, not {data_width!r}")
+        if data_width & (data_width - 1) != 0:
+            raise ValueError(f"Data width must be a power of 2, not {data_width!r}")
         if not isinstance(id_width, int) or id_width < 0:
             raise TypeError(f"ID width must be a non-negative integer, not {id_width!r}")
 

@@ -3,7 +3,7 @@ import bisect
 from amaranth.lib import wiring
 
 
-__all__ = ["ResourceInfo", "MemoryMap"]
+__all__ = ["ResourceInfo", "MemoryMap", "BARMemoryMap"]
 
 
 class _RangeMap:
@@ -684,3 +684,92 @@ class MemoryMap:
 
     def __repr__(self):
         return f"MemoryMap({self._namespace!r})"
+
+
+class BARMemoryMap:
+    """BAR-relative memory map for PCIe and runtime-configured address spaces.
+
+    Wraps a MemoryMap with a BAR (Base Address Register) concept.
+    Resources are added at offsets relative to the BAR base.
+    The BAR base address can be configured at runtime.
+
+    Parameters
+    ----------
+    bar_index : int
+        BAR index (0-5 for PCIe).
+    size : int
+        Total size of the BAR region in bytes.
+    data_width : int
+        Data width (default 8 for byte-addressable).
+    name : str or None
+        Optional name for the BAR.
+    """
+    def __init__(self, *, bar_index, size, data_width=8, name=None):
+        if not isinstance(bar_index, int) or bar_index < 0:
+            raise ValueError(f"BAR index must be a non-negative integer, not {bar_index!r}")
+        if not isinstance(size, int) or size <= 0:
+            raise ValueError(f"Size must be a positive integer, not {size!r}")
+        if size & (size - 1) != 0:
+            raise ValueError(f"Size must be a power of 2, not {size!r}")
+
+        self._bar_index = bar_index
+        self._size = size
+        self._name = name or f"BAR{bar_index}"
+        self._base_addr = 0  # Runtime-configurable
+
+        # Calculate addr_width from size
+        addr_width = (size - 1).bit_length()
+        self._memory_map = MemoryMap(addr_width=addr_width, data_width=data_width)
+
+    @property
+    def bar_index(self):
+        return self._bar_index
+
+    @property
+    def size(self):
+        return self._size
+
+    @property
+    def name(self):
+        return self._name
+
+    @property
+    def base_addr(self):
+        """Runtime-configurable base address."""
+        return self._base_addr
+
+    @base_addr.setter
+    def base_addr(self, value):
+        if not isinstance(value, int) or value < 0:
+            raise ValueError(f"Base address must be a non-negative integer, not {value!r}")
+        self._base_addr = value
+
+    @property
+    def memory_map(self):
+        """Underlying MemoryMap with relative addresses."""
+        return self._memory_map
+
+    def add_resource(self, resource, *, name, size, addr=None):
+        """Add a resource at a BAR-relative offset."""
+        return self._memory_map.add_resource(resource, name=name, size=size, addr=addr)
+
+    def add_window(self, window, *, name=None, addr=None):
+        """Add a sub-window at a BAR-relative offset."""
+        return self._memory_map.add_window(window, name=name, addr=addr)
+
+    def resources(self):
+        """Iterate resources with BAR-relative addresses."""
+        return self._memory_map.resources()
+
+    def absolute_addr(self, offset):
+        """Convert a BAR-relative offset to an absolute address."""
+        return self._base_addr + offset
+
+    def relative_addr(self, absolute):
+        """Convert an absolute address to a BAR-relative offset."""
+        if absolute < self._base_addr or absolute >= self._base_addr + self._size:
+            raise ValueError(
+                f"Address {absolute:#x} is outside BAR{self._bar_index} "
+                f"range [{self._base_addr:#x}, {self._base_addr + self._size:#x})"
+            )
+        return absolute - self._base_addr

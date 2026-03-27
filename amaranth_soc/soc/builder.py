@@ -164,6 +164,158 @@ class SoCBuilder:
         })
         return self
 
+    def add_bridge(self, *, src_type, dst_type, addr_width=None, data_width=None):
+        """Add an automatic bus bridge between different bus protocols.
+
+        Uses the :class:`~amaranth_soc.bridge.registry.BusAdapter` registry
+        to find the appropriate bridge component.
+
+        Parameters
+        ----------
+        src_type : str
+            Source bus type (``"wishbone"`` or ``"axi4lite"``).
+        dst_type : str
+            Destination bus type (``"wishbone"`` or ``"axi4lite"``).
+        addr_width : int or None
+            Address width. Defaults to the builder's ``bus_addr_width``.
+        data_width : int or None
+            Data width. Defaults to the builder's ``bus_data_width``.
+
+        Returns
+        -------
+        bridge component or list
+            The bridge instance(s) needed for the conversion.
+
+        Raises
+        ------
+        ValueError
+            If *src_type* or *dst_type* is not a recognised bus type string,
+            or if no bridge path exists between the two standards.
+        """
+        _type_map = {
+            "wishbone": BusStandard.WISHBONE,
+            "axi4lite": BusStandard.AXI4_LITE,
+            "axi4-lite": BusStandard.AXI4_LITE,
+            "axi4": BusStandard.AXI4,
+        }
+        if src_type not in _type_map:
+            raise ValueError(f"Unknown source bus type {src_type!r}; "
+                             f"expected one of {list(_type_map)}")
+        if dst_type not in _type_map:
+            raise ValueError(f"Unknown destination bus type {dst_type!r}; "
+                             f"expected one of {list(_type_map)}")
+
+        from ..bridge.registry import BusAdapter
+
+        src_std = _type_map[src_type]
+        dst_std = _type_map[dst_type]
+        aw = addr_width if addr_width is not None else self._bus_addr_width
+        dw = data_width if data_width is not None else self._bus_data_width
+
+        bridge = BusAdapter.adapt(
+            None, src_std, dst_std,
+            addr_width=aw, data_width=dw,
+        )
+        if not hasattr(self, "_bridges"):
+            self._bridges = []
+        self._bridges.append({
+            "bridge": bridge,
+            "src_type": src_std,
+            "dst_type": dst_std,
+            "addr_width": aw,
+            "data_width": dw,
+        })
+        return bridge
+
+    def add_dma_channel(self, *, name, addr_width=32, data_width=32, max_burst_len=16):
+        """Register a DMA channel with the SoC builder.
+
+        The channel configuration is stored and can be used during
+        elaboration to instantiate DMA reader/writer pairs.
+
+        Parameters
+        ----------
+        name : str
+            Unique name for the DMA channel.
+        addr_width : int
+            Address width (default 32).
+        data_width : int
+            Data width (default 32).
+        max_burst_len : int
+            Maximum burst length (default 16).
+
+        Returns
+        -------
+        self
+            For method chaining.
+        """
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"DMA channel name must be a non-empty string, not {name!r}")
+        if not isinstance(addr_width, int) or addr_width <= 0:
+            raise ValueError(f"addr_width must be a positive integer, not {addr_width!r}")
+        if not isinstance(data_width, int) or data_width <= 0:
+            raise ValueError(f"data_width must be a positive integer, not {data_width!r}")
+        if not isinstance(max_burst_len, int) or max_burst_len <= 0:
+            raise ValueError(f"max_burst_len must be a positive integer, not {max_burst_len!r}")
+
+        if not hasattr(self, "_dma_channels"):
+            self._dma_channels = []
+
+        # Check for duplicate names
+        for ch in self._dma_channels:
+            if ch["name"] == name:
+                raise ValueError(f"DMA channel {name!r} already registered")
+
+        self._dma_channels.append({
+            "name": name,
+            "addr_width": addr_width,
+            "data_width": data_width,
+            "max_burst_len": max_burst_len,
+        })
+        return self
+
+    def add_interrupt_controller(self, *, n_sources, edge_triggered=False):
+        """Register an interrupt controller with the SoC builder.
+
+        Parameters
+        ----------
+        n_sources : int
+            Number of interrupt sources.
+        edge_triggered : bool
+            If True, interrupts are edge-triggered; otherwise level-triggered.
+
+        Returns
+        -------
+        self
+            For method chaining.
+        """
+        if not isinstance(n_sources, int) or n_sources <= 0:
+            raise ValueError(f"n_sources must be a positive integer, not {n_sources!r}")
+
+        if not hasattr(self, "_interrupt_controllers"):
+            self._interrupt_controllers = []
+
+        self._interrupt_controllers.append({
+            "n_sources": n_sources,
+            "edge_triggered": edge_triggered,
+        })
+        return self
+
+    @property
+    def bridges(self):
+        """List of registered bridge configurations."""
+        return list(getattr(self, "_bridges", []))
+
+    @property
+    def dma_channels(self):
+        """List of registered DMA channel configurations."""
+        return list(getattr(self, "_dma_channels", []))
+
+    @property
+    def interrupt_controllers(self):
+        """List of registered interrupt controller configurations."""
+        return list(getattr(self, "_interrupt_controllers", []))
+
     def build(self):
         """Build the SoC and return a SoC component.
 

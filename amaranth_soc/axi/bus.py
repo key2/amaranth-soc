@@ -4,6 +4,7 @@ from amaranth.lib import wiring
 from amaranth.lib.wiring import In, Out
 from amaranth.utils import exact_log2
 
+from amaranth_soc.bus_common import Endianness
 from amaranth_soc.memory import MemoryMap
 
 
@@ -48,9 +49,10 @@ class AXI4LiteSignature(wiring.Signature):
     ----------
     addr_width : int
         Width of the address signals (``awaddr``, ``araddr``).
-    data_width : ``32`` or ``64``
-        Width of the data signals (``wdata``, ``rdata``). Per the AXI4-Lite specification,
-        only 32-bit and 64-bit data widths are supported.
+    data_width : int, power of 2, >= 32
+        Width of the data signals (``wdata``, ``rdata``). Must be a power of 2 and at
+        least 32. The AXI4-Lite specification defines 32 and 64, but wider widths
+        (128, 256, etc.) are accepted for high-bandwidth internal SoC buses.
 
     Interface attributes
     --------------------
@@ -65,14 +67,19 @@ class AXI4LiteSignature(wiring.Signature):
     Read Data channel (R):
         rdata, rresp, rvalid, rready
     """
-    def __init__(self, *, addr_width, data_width):
+    def __init__(self, *, addr_width, data_width, endianness=Endianness.LITTLE):
         if not isinstance(addr_width, int) or addr_width < 0:
             raise TypeError(f"Address width must be a non-negative integer, not {addr_width!r}")
-        if data_width not in (32, 64):
-            raise ValueError(f"Data width must be one of 32, 64, not {data_width!r}")
+        if not isinstance(data_width, int) or data_width < 32:
+            raise ValueError(f"Data width must be a positive integer >= 32, not {data_width!r}")
+        if data_width & (data_width - 1) != 0:
+            raise ValueError(f"Data width must be a power of 2, not {data_width!r}")
+        if not isinstance(endianness, Endianness):
+            raise ValueError(f"Endianness must be an instance of Endianness, not {endianness!r}")
 
         self._addr_width = addr_width
         self._data_width = data_width
+        self._endianness = endianness
 
         members = {
             # Write Address channel (AW)
@@ -110,6 +117,10 @@ class AXI4LiteSignature(wiring.Signature):
     def data_width(self):
         return self._data_width
 
+    @property
+    def endianness(self):
+        return self._endianness
+
     def create(self, *, path=None, src_loc_at=0):
         """Create a compatible interface.
 
@@ -120,16 +131,18 @@ class AXI4LiteSignature(wiring.Signature):
         An :class:`AXI4LiteInterface` object using this signature.
         """
         return AXI4LiteInterface(addr_width=self.addr_width, data_width=self.data_width,
+                                 endianness=self.endianness,
                                  path=path, src_loc_at=1 + src_loc_at)
 
     def __eq__(self, other):
         """Compare signatures.
 
-        Two signatures are equal if they have the same address width and data width.
+        Two signatures are equal if they have the same address width, data width, and endianness.
         """
         return (isinstance(other, AXI4LiteSignature) and
                 self.addr_width == other.addr_width and
-                self.data_width == other.data_width)
+                self.data_width == other.data_width and
+                self.endianness == other.endianness)
 
     def __repr__(self):
         return f"AXI4LiteSignature({self.members!r})"
@@ -152,8 +165,10 @@ class AXI4LiteInterface(wiring.PureInterface):
     memory_map : :class:`MemoryMap`
         Memory map of the bus. Optional.
     """
-    def __init__(self, *, addr_width, data_width, path=None, src_loc_at=0):
-        super().__init__(AXI4LiteSignature(addr_width=addr_width, data_width=data_width),
+    def __init__(self, *, addr_width, data_width, endianness=Endianness.LITTLE,
+                 path=None, src_loc_at=0):
+        super().__init__(AXI4LiteSignature(addr_width=addr_width, data_width=data_width,
+                                           endianness=endianness),
                          path=path, src_loc_at=1 + src_loc_at)
         self._memory_map = None
 
@@ -164,6 +179,10 @@ class AXI4LiteInterface(wiring.PureInterface):
     @property
     def data_width(self):
         return self.signature.data_width
+
+    @property
+    def endianness(self):
+        return self.signature.endianness
 
     @property
     def memory_map(self):
@@ -226,7 +245,8 @@ class AXI4Signature(wiring.Signature):
     R channel additions:
         rid, rlast, ruser
     """
-    def __init__(self, *, addr_width, data_width, id_width=0, user_width=None):
+    def __init__(self, *, addr_width, data_width, id_width=0, user_width=None,
+                 endianness=Endianness.LITTLE):
         if user_width is None:
             user_width = {"aw": 0, "w": 0, "b": 0, "ar": 0, "r": 0}
 
@@ -247,10 +267,14 @@ class AXI4Signature(wiring.Signature):
                 raise TypeError(f"User width for channel {key!r} must be a non-negative integer, "
                                 f"not {user_width[key]!r}")
 
+        if not isinstance(endianness, Endianness):
+            raise ValueError(f"Endianness must be an instance of Endianness, not {endianness!r}")
+
         self._addr_width  = addr_width
         self._data_width  = data_width
         self._id_width    = id_width
         self._user_width  = dict(user_width)
+        self._endianness  = endianness
 
         members = {}
 
@@ -333,6 +357,10 @@ class AXI4Signature(wiring.Signature):
     def user_width(self):
         return dict(self._user_width)
 
+    @property
+    def endianness(self):
+        return self._endianness
+
     def create(self, *, path=None, src_loc_at=0):
         """Create a compatible interface.
 
@@ -344,19 +372,21 @@ class AXI4Signature(wiring.Signature):
         """
         return AXI4Interface(addr_width=self.addr_width, data_width=self.data_width,
                              id_width=self.id_width, user_width=self.user_width,
+                             endianness=self.endianness,
                              path=path, src_loc_at=1 + src_loc_at)
 
     def __eq__(self, other):
         """Compare signatures.
 
         Two signatures are equal if they have the same address width, data width, ID width,
-        and user widths.
+        user widths, and endianness.
         """
         return (isinstance(other, AXI4Signature) and
                 self.addr_width == other.addr_width and
                 self.data_width == other.data_width and
                 self.id_width == other.id_width and
-                self._user_width == other._user_width)
+                self._user_width == other._user_width and
+                self.endianness == other.endianness)
 
     def __repr__(self):
         return f"AXI4Signature({self.members!r})"
@@ -384,9 +414,10 @@ class AXI4Interface(wiring.PureInterface):
         Memory map of the bus. Optional.
     """
     def __init__(self, *, addr_width, data_width, id_width=0, user_width=None,
-                 path=None, src_loc_at=0):
+                 endianness=Endianness.LITTLE, path=None, src_loc_at=0):
         super().__init__(AXI4Signature(addr_width=addr_width, data_width=data_width,
-                                       id_width=id_width, user_width=user_width),
+                                       id_width=id_width, user_width=user_width,
+                                       endianness=endianness),
                          path=path, src_loc_at=1 + src_loc_at)
         self._memory_map = None
 
@@ -407,6 +438,10 @@ class AXI4Interface(wiring.PureInterface):
         return self.signature.user_width
 
     @property
+    def endianness(self):
+        return self.signature.endianness
+
+    @property
     def memory_map(self):
         if self._memory_map is None:
             raise AttributeError(f"{self!r} does not have a memory map")
@@ -416,13 +451,17 @@ class AXI4Interface(wiring.PureInterface):
     def memory_map(self, memory_map):
         if not isinstance(memory_map, MemoryMap):
             raise TypeError(f"Memory map must be an instance of MemoryMap, not {memory_map!r}")
-        if memory_map.data_width != self.data_width:
+        # AXI4 uses byte addressing. The memory map data_width can be:
+        # - 8 (byte-addressable, standard for SoC integration with MemoryMap)
+        # - Equal to bus data_width (word-addressed map)
+        if memory_map.data_width not in (8, self.data_width):
             raise ValueError(f"Memory map has data width {memory_map.data_width}, which is "
-                             f"not the same as bus interface data width {self.data_width}")
-        if memory_map.addr_width != max(1, self.addr_width):
+                             f"not 8 (byte-addressable) or {self.data_width} (bus data width)")
+        expected_addr_width = max(1, self.addr_width)
+        if memory_map.addr_width != expected_addr_width:
             raise ValueError(f"Memory map has address width {memory_map.addr_width}, which is "
                              f"not the same as bus interface address width "
-                             f"{max(1, self.addr_width)}")
+                             f"{expected_addr_width}")
         self._memory_map = memory_map
 
     def __repr__(self):

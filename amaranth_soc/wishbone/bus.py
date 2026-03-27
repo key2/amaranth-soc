@@ -3,10 +3,12 @@ from amaranth.lib import enum, wiring
 from amaranth.lib.wiring import In, Out, connect, flipped
 from amaranth.utils import exact_log2
 
+from ..bus_common import Endianness
 from ..memory import MemoryMap
 
 
-__all__ = ["CycleType", "BurstTypeExt", "Feature", "Signature", "Interface", "Decoder", "Arbiter"]
+__all__ = ["CycleType", "BurstTypeExt", "Feature", "Signature", "Interface", "Decoder", "Arbiter",
+           "Crossbar"]
 
 
 class CycleType(enum.Enum):
@@ -89,7 +91,8 @@ class Signature(wiring.Signature):
     bte : Signal()
         Optional. Corresponds to Wishbone signal ``BTE_O`` (initiator) or ``BTE_I`` (target).
     """
-    def __init__(self, *, addr_width, data_width, granularity=None, features=frozenset()):
+    def __init__(self, *, addr_width, data_width, granularity=None, features=frozenset(),
+                 endianness=Endianness.LITTLE):
         if granularity is None:
             granularity = data_width
 
@@ -104,11 +107,14 @@ class Signature(wiring.Signature):
                              f"{data_width}")
         for feature in features:
             Feature(feature) # raises ValueError if feature is invalid
+        if not isinstance(endianness, Endianness):
+            raise ValueError(f"Endianness must be an instance of Endianness, not {endianness!r}")
 
         self._addr_width  = addr_width
         self._data_width  = data_width
         self._granularity = granularity
         self._features    = frozenset(Feature(f) for f in features)
+        self._endianness  = endianness
 
         members = {
             "adr":   Out(self.addr_width),
@@ -150,6 +156,10 @@ class Signature(wiring.Signature):
     def features(self):
         return self._features
 
+    @property
+    def endianness(self):
+        return self._endianness
+
     def create(self, *, path=None, src_loc_at=0):
         """Create a compatible interface.
 
@@ -161,19 +171,21 @@ class Signature(wiring.Signature):
         """
         return Interface(addr_width=self.addr_width, data_width=self.data_width,
                          granularity=self.granularity, features=self.features,
+                         endianness=self.endianness,
                          path=path, src_loc_at=1 + src_loc_at)
 
     def __eq__(self, other):
         """Compare signatures.
 
-        Two signatures are equal if they have the same address width, data width, granularity and
-        features.
+        Two signatures are equal if they have the same address width, data width, granularity,
+        features, and endianness.
         """
         return (isinstance(other, Signature) and
                 self.addr_width == other.addr_width and
                 self.data_width == other.data_width and
                 self.granularity == other.granularity and
-                self.features == other.features)
+                self.features == other.features and
+                self.endianness == other.endianness)
 
     def __repr__(self):
         return f"wishbone.Signature({self.members!r})"
@@ -205,9 +217,10 @@ class Interface(wiring.PureInterface):
         Memory map of the bus. Optional.
     """
     def __init__(self, *, addr_width, data_width, granularity=None, features=frozenset(),
-                 path=None, src_loc_at=0):
+                 endianness=Endianness.LITTLE, path=None, src_loc_at=0):
         super().__init__(Signature(addr_width=addr_width, data_width=data_width,
-                                   granularity=granularity, features=features),
+                                   granularity=granularity, features=features,
+                                   endianness=endianness),
                          path=path, src_loc_at=1 + src_loc_at)
         self._memory_map = None
 
@@ -226,6 +239,10 @@ class Interface(wiring.PureInterface):
     @property
     def features(self):
         return self.signature.features
+
+    @property
+    def endianness(self):
+        return self.signature.endianness
 
     @property
     def memory_map(self):
@@ -403,41 +420,93 @@ class Decoder(wiring.Component):
     def elaborate(self, platform):
         m = Module()
 
+        # Collect all subordinate shims in order for indexed access.
+        sub_shims = []
+        for sub_map, sub_name, (sub_pattern, ratio) in self.bus.memory_map.window_patterns():
+            sub_bus = self._subs[sub_map]
+            shim = _FeatureShim(sub_bus.addr_width, sub_bus.data_width, sub_bus.granularity,
+                                intr_features=self.bus.features, sub_features=sub_bus.features)
+            m.submodules[f"shim_{sub_pattern.replace('-', 'x')}"] = shim
+            connect(m, shim.sub_bus, sub_bus)
+
+            m.d.comb += [
+                shim.intr_bus.adr.eq(self.bus.adr << exact_log2(ratio)),
+                shim.intr_bus.dat_w.eq(self.bus.dat_w),
+                shim.intr_bus.sel.eq(Cat(sel.replicate(ratio) for sel in self.bus.sel)),
+                shim.intr_bus.we.eq(self.bus.we),
+                shim.intr_bus.stb.eq(self.bus.stb)
+            ]
+            if hasattr(self.bus, "lock"):
+                m.d.comb += shim.intr_bus.lock.eq(self.bus.lock)
+            if hasattr(self.bus, "cti"):
+                m.d.comb += shim.intr_bus.cti.eq(self.bus.cti)
+            if hasattr(self.bus, "bte"):
+                m.d.comb += shim.intr_bus.bte.eq(self.bus.bte)
+
+            sub_shims.append((sub_pattern, ratio, shim))
+
+        n_subs = len(sub_shims)
+
+        # Combinational address decode: determine which subordinate is selected.
+        sub_sel = Signal(range(max(n_subs, 1)), name="sub_sel")
+        sub_hit = Signal(name="sub_hit")
         with m.Switch(self.bus.adr):
-            for sub_map, sub_name, (sub_pattern, ratio) in self.bus.memory_map.window_patterns():
-                sub_bus = self._subs[sub_map]
-                m.submodules[f"shim_{sub_pattern.replace('-', 'x')}"] = shim = \
-                    _FeatureShim(sub_bus.addr_width, sub_bus.data_width, sub_bus.granularity,
-                                 intr_features=self.bus.features, sub_features=sub_bus.features)
-                connect(m, shim.sub_bus, sub_bus)
-
-                m.d.comb += [
-                    shim.intr_bus.adr.eq(self.bus.adr << exact_log2(ratio)),
-                    shim.intr_bus.dat_w.eq(self.bus.dat_w),
-                    shim.intr_bus.sel.eq(Cat(sel.replicate(ratio) for sel in self.bus.sel)),
-                    shim.intr_bus.we.eq(self.bus.we),
-                    shim.intr_bus.stb.eq(self.bus.stb)
-                ]
-                if hasattr(self.bus, "lock"):
-                    m.d.comb += shim.intr_bus.lock.eq(self.bus.lock)
-                if hasattr(self.bus, "cti"):
-                    m.d.comb += shim.intr_bus.cti.eq(self.bus.cti)
-                if hasattr(self.bus, "bte"):
-                    m.d.comb += shim.intr_bus.bte.eq(self.bus.bte)
-
+            for idx, (sub_pattern, ratio, shim) in enumerate(sub_shims):
                 granularity_bits = exact_log2(self.bus.data_width // self.bus.granularity)
                 with m.Case(sub_pattern[:-granularity_bits if granularity_bits > 0 else None]):
-                    m.d.comb += [
-                        shim.intr_bus.cyc.eq(self.bus.cyc),
-                        self.bus.dat_r.eq(shim.intr_bus.dat_r),
-                        self.bus.ack.eq(shim.intr_bus.ack)
-                    ]
-                    if hasattr(self.bus, "err"):
-                        m.d.comb += self.bus.err.eq(shim.intr_bus.err)
-                    if hasattr(self.bus, "rty"):
-                        m.d.comb += self.bus.rty.eq(shim.intr_bus.rty)
-                    if hasattr(self.bus, "stall"):
-                        m.d.comb += self.bus.stall.eq(shim.intr_bus.stall)
+                    m.d.comb += sub_sel.eq(idx)
+                    m.d.comb += sub_hit.eq(1)
+
+        # Burst-aware address locking (only when CTI feature is present).
+        if hasattr(self.bus, "cti"):
+            burst_active = Signal(name="burst_active")
+            sub_latched = Signal(range(max(n_subs, 1)), name="sub_latched")
+            sub_latched_valid = Signal(name="sub_latched_valid")
+
+            # A burst is active when CTI indicates a burst type.
+            m.d.comb += burst_active.eq(
+                (self.bus.cti == CycleType.CONST_BURST) |
+                (self.bus.cti == CycleType.INCR_BURST)
+            )
+
+            # Latch the subordinate on the first cycle of a burst.
+            with m.If(self.bus.cyc & self.bus.stb & burst_active & ~sub_latched_valid):
+                m.d.sync += sub_latched.eq(sub_sel)
+                m.d.sync += sub_latched_valid.eq(1)
+
+            # Clear latch when burst ends or cyc drops.
+            with m.If(~self.bus.cyc | (self.bus.stb & (self.bus.cti == CycleType.END_OF_BURST))):
+                m.d.sync += sub_latched_valid.eq(0)
+
+            # Use latched subordinate during burst, combinational decode otherwise.
+            effective_sub = Signal(range(max(n_subs, 1)), name="effective_sub")
+            effective_hit = Signal(name="effective_hit")
+            with m.If(sub_latched_valid & burst_active):
+                m.d.comb += effective_sub.eq(sub_latched)
+                m.d.comb += effective_hit.eq(1)
+            with m.Else():
+                m.d.comb += effective_sub.eq(sub_sel)
+                m.d.comb += effective_hit.eq(sub_hit)
+        else:
+            effective_sub = sub_sel
+            effective_hit = sub_hit
+
+        # Route bus signals to the selected subordinate.
+        with m.If(effective_hit):
+            with m.Switch(effective_sub):
+                for idx, (sub_pattern, ratio, shim) in enumerate(sub_shims):
+                    with m.Case(idx):
+                        m.d.comb += [
+                            shim.intr_bus.cyc.eq(self.bus.cyc),
+                            self.bus.dat_r.eq(shim.intr_bus.dat_r),
+                            self.bus.ack.eq(shim.intr_bus.ack)
+                        ]
+                        if hasattr(self.bus, "err"):
+                            m.d.comb += self.bus.err.eq(shim.intr_bus.err)
+                        if hasattr(self.bus, "rty"):
+                            m.d.comb += self.bus.rty.eq(shim.intr_bus.rty)
+                        if hasattr(self.bus, "stall"):
+                            m.d.comb += self.bus.stall.eq(shim.intr_bus.stall)
 
         return m
 
@@ -496,7 +565,17 @@ class Arbiter(wiring.Component):
         grant    = Signal(range(len(self._intrs)))
         m.d.comb += requests.eq(Cat(intr_bus.cyc for intr_bus in self._intrs))
 
-        with m.If(~self.bus.cyc):
+        # Lock-aware arbitration: when the granted initiator asserts LOCK,
+        # do not re-arbitrate even if cyc drops briefly.
+        locked_by_initiator = Signal(name="locked_by_initiator")
+        if hasattr(self.bus, "lock"):
+            with m.Switch(grant):
+                for i, intr_bus in enumerate(self._intrs):
+                    with m.Case(i):
+                        if hasattr(intr_bus, "lock"):
+                            m.d.comb += locked_by_initiator.eq(intr_bus.lock)
+
+        with m.If(~self.bus.cyc & ~locked_by_initiator):
             with m.Switch(grant):
                 for i in range(len(requests)):
                     with m.Case(i):
@@ -541,5 +620,260 @@ class Arbiter(wiring.Component):
                         m.d.comb += shim.sub_bus.rty.eq(self.bus.rty)
                     if hasattr(self.bus, "stall"):
                         m.d.comb += shim.sub_bus.stall.eq(self.bus.stall)
+
+        return m
+
+
+class Crossbar(wiring.Component):
+    """Wishbone crossbar interconnect.
+
+    Composes Decoders and Arbiters to create an N×M crossbar that routes
+    transactions from multiple initiators to multiple subordinates based
+    on address decoding.
+
+    For each initiator, a Decoder is created to route its transactions.
+    For each subordinate, an Arbiter is created to handle concurrent access.
+
+    The crossbar is built by:
+    1. Creating N decoders (one per initiator), each with M subordinate windows
+    2. Creating M arbiters (one per subordinate), each with N initiator inputs
+    3. Wiring initiator → decoder → arbiter → subordinate
+
+    Parameters
+    ----------
+    addr_width : int
+        Address width.
+    data_width : int
+        Data width (8, 16, 32, or 64).
+    granularity : int
+        Bus granularity (default: same as data_width).
+    features : frozenset of Feature
+        Optional bus features.
+    alignment : int
+        Memory map alignment (default 0).
+    """
+
+    def __init__(self, *, addr_width, data_width, granularity=None, features=frozenset(),
+                 alignment=0):
+        if granularity is None:
+            granularity = data_width
+        if not isinstance(addr_width, int) or addr_width < 0:
+            raise TypeError(f"Address width must be a non-negative integer, not {addr_width!r}")
+        if data_width not in (8, 16, 32, 64):
+            raise ValueError(f"Data width must be one of 8, 16, 32, 64, not {data_width!r}")
+        if granularity not in (8, 16, 32, 64):
+            raise ValueError(f"Granularity must be one of 8, 16, 32, 64, not {granularity!r}")
+        if granularity > data_width:
+            raise ValueError(f"Granularity {granularity} may not be greater than data width "
+                             f"{data_width}")
+
+        self._addr_width  = addr_width
+        self._data_width  = data_width
+        self._granularity = granularity
+        self._features    = frozenset(Feature(f) for f in features)
+        self._alignment   = alignment
+        self._initiators  = []
+        self._subordinates = []
+        self._built = False
+
+        # Dynamic configuration — no signature at construction time.
+        super().__init__({})
+
+    @property
+    def addr_width(self):
+        return self._addr_width
+
+    @property
+    def data_width(self):
+        return self._data_width
+
+    @property
+    def granularity(self):
+        return self._granularity
+
+    @property
+    def features(self):
+        return self._features
+
+    @property
+    def alignment(self):
+        return self._alignment
+
+    def add_initiator(self, intr_bus, *, name=None):
+        """Add an initiator (master) port.
+
+        Parameters
+        ----------
+        intr_bus : Interface
+            The initiator bus interface to connect.
+        name : str or None
+            Optional name for this initiator.
+        """
+        if self._built:
+            raise RuntimeError("Cannot add initiators after elaborate() has been called")
+        if isinstance(intr_bus, wiring.FlippedInterface):
+            intr_bus_check = flipped(intr_bus)
+        else:
+            intr_bus_check = intr_bus
+        if not isinstance(intr_bus_check, Interface):
+            raise TypeError(f"Initiator bus must be an instance of wishbone.Interface, not "
+                            f"{intr_bus_check!r}")
+        if intr_bus.data_width != self._data_width:
+            raise ValueError(f"Initiator bus has data width {intr_bus.data_width}, which is "
+                             f"not the same as crossbar data width {self._data_width}")
+        if intr_bus.granularity != self._granularity:
+            raise ValueError(f"Initiator bus has granularity {intr_bus.granularity}, which is "
+                             f"not the same as crossbar granularity {self._granularity}")
+        idx = len(self._initiators)
+        if name is None:
+            name = f"initiator_{idx}"
+        self._initiators.append((intr_bus, name))
+
+    def add_subordinate(self, sub_bus, *, name=None, addr=None):
+        """Add a subordinate (slave) port with address mapping.
+
+        Parameters
+        ----------
+        sub_bus : Interface
+            The subordinate bus interface to connect.
+        name : str or None
+            Name for this subordinate in the memory map.
+        addr : int or None
+            Base address. If None, auto-allocated.
+        """
+        if self._built:
+            raise RuntimeError("Cannot add subordinates after elaborate() has been called")
+        if isinstance(sub_bus, wiring.FlippedInterface):
+            sub_bus_check = flipped(sub_bus)
+        else:
+            sub_bus_check = sub_bus
+        if not isinstance(sub_bus_check, Interface):
+            raise TypeError(f"Subordinate bus must be an instance of wishbone.Interface, not "
+                            f"{sub_bus_check!r}")
+        if sub_bus.data_width != self._data_width:
+            raise ValueError(f"Subordinate bus has data width {sub_bus.data_width}, which is "
+                             f"not the same as crossbar data width {self._data_width}")
+        idx = len(self._subordinates)
+        if name is None:
+            name = f"subordinate_{idx}"
+        self._subordinates.append((sub_bus, name, addr))
+
+    def elaborate(self, platform):
+        m = Module()
+        self._built = True
+
+        n_initiators = len(self._initiators)
+        n_subordinates = len(self._subordinates)
+
+        if n_initiators == 0 or n_subordinates == 0:
+            return m
+
+        # --- Create one Decoder per initiator ---
+        decoders = []
+        for i, (intr_bus, intr_name) in enumerate(self._initiators):
+            dec = Decoder(addr_width=self._addr_width, data_width=self._data_width,
+                          granularity=self._granularity, features=self._features,
+                          alignment=self._alignment)
+            m.submodules[f"dec_{intr_name}"] = dec
+            decoders.append(dec)
+
+        # --- Create intermediate interfaces ---
+        # For each (initiator_i, subordinate_j) pair, create one Interface.
+        # Pass flipped(inter) to the decoder (target-side) and the normal inter
+        # to the arbiter (initiator-side). The decoder's connect() and arbiter's
+        # connect() will both work because the directions are correct.
+        inter_buses = {}  # (i, j) → Interface
+
+        for i, dec in enumerate(decoders):
+            for j, (sub_bus, sub_name, sub_addr) in enumerate(self._subordinates):
+                sub_map = sub_bus.memory_map
+                sub_aw = sub_map.addr_width
+                granularity_bits = exact_log2(self._data_width // self._granularity)
+                iface_addr_width = sub_aw - granularity_bits if granularity_bits > 0 else sub_aw
+                if iface_addr_width < 0:
+                    iface_addr_width = 0
+
+                inter = Interface(addr_width=iface_addr_width,
+                                  data_width=self._data_width,
+                                  granularity=self._granularity,
+                                  features=self._features,
+                                  path=["xbar", f"i{i}_s{j}"])
+                inter.memory_map = MemoryMap(addr_width=sub_aw,
+                                             data_width=sub_map.data_width)
+                # Pass flipped to decoder (target-side)
+                dec.add(flipped(inter), name=sub_name, addr=sub_addr)
+                inter_buses[(i, j)] = inter
+
+        # --- Create one Arbiter per subordinate ---
+        arbiters = []
+        for j, (sub_bus, sub_name, sub_addr) in enumerate(self._subordinates):
+            sub_map = sub_bus.memory_map
+            sub_aw = sub_map.addr_width
+            granularity_bits = exact_log2(self._data_width // self._granularity)
+            arb_addr_width = sub_aw - granularity_bits if granularity_bits > 0 else sub_aw
+            if arb_addr_width < 0:
+                arb_addr_width = 0
+            arb = Arbiter(addr_width=arb_addr_width,
+                          data_width=self._data_width,
+                          granularity=self._granularity,
+                          features=self._features)
+            m.submodules[f"arb_{sub_name}"] = arb
+            arbiters.append(arb)
+
+            # Pass normal (initiator-side) interfaces to arbiter
+            for i in range(n_initiators):
+                arb.add(inter_buses[(i, j)])
+
+        # --- Wire initiator buses to decoder inputs ---
+        for i, (intr_bus, intr_name) in enumerate(self._initiators):
+            dec = decoders[i]
+            m.d.comb += [
+                dec.bus.adr.eq(intr_bus.adr),
+                dec.bus.dat_w.eq(intr_bus.dat_w),
+                dec.bus.sel.eq(intr_bus.sel),
+                dec.bus.cyc.eq(intr_bus.cyc),
+                dec.bus.stb.eq(intr_bus.stb),
+                dec.bus.we.eq(intr_bus.we),
+                intr_bus.dat_r.eq(dec.bus.dat_r),
+                intr_bus.ack.eq(dec.bus.ack),
+            ]
+            if hasattr(dec.bus, "err") and hasattr(intr_bus, "err"):
+                m.d.comb += intr_bus.err.eq(dec.bus.err)
+            if hasattr(dec.bus, "rty") and hasattr(intr_bus, "rty"):
+                m.d.comb += intr_bus.rty.eq(dec.bus.rty)
+            if hasattr(dec.bus, "stall") and hasattr(intr_bus, "stall"):
+                m.d.comb += intr_bus.stall.eq(dec.bus.stall)
+            if hasattr(intr_bus, "lock") and hasattr(dec.bus, "lock"):
+                m.d.comb += dec.bus.lock.eq(intr_bus.lock)
+            if hasattr(intr_bus, "cti") and hasattr(dec.bus, "cti"):
+                m.d.comb += dec.bus.cti.eq(intr_bus.cti)
+            if hasattr(intr_bus, "bte") and hasattr(dec.bus, "bte"):
+                m.d.comb += dec.bus.bte.eq(intr_bus.bte)
+
+        # --- Wire arbiter outputs to subordinate buses ---
+        for j, (sub_bus, sub_name, sub_addr) in enumerate(self._subordinates):
+            arb = arbiters[j]
+            m.d.comb += [
+                sub_bus.adr.eq(arb.bus.adr),
+                sub_bus.dat_w.eq(arb.bus.dat_w),
+                sub_bus.sel.eq(arb.bus.sel),
+                sub_bus.cyc.eq(arb.bus.cyc),
+                sub_bus.stb.eq(arb.bus.stb),
+                sub_bus.we.eq(arb.bus.we),
+                arb.bus.dat_r.eq(sub_bus.dat_r),
+                arb.bus.ack.eq(sub_bus.ack),
+            ]
+            if hasattr(sub_bus, "err") and hasattr(arb.bus, "err"):
+                m.d.comb += arb.bus.err.eq(sub_bus.err)
+            if hasattr(sub_bus, "rty") and hasattr(arb.bus, "rty"):
+                m.d.comb += arb.bus.rty.eq(sub_bus.rty)
+            if hasattr(sub_bus, "stall") and hasattr(arb.bus, "stall"):
+                m.d.comb += arb.bus.stall.eq(sub_bus.stall)
+            if hasattr(arb.bus, "lock") and hasattr(sub_bus, "lock"):
+                m.d.comb += sub_bus.lock.eq(arb.bus.lock)
+            if hasattr(arb.bus, "cti") and hasattr(sub_bus, "cti"):
+                m.d.comb += sub_bus.cti.eq(arb.bus.cti)
+            if hasattr(arb.bus, "bte") and hasattr(sub_bus, "bte"):
+                m.d.comb += sub_bus.bte.eq(arb.bus.bte)
 
         return m

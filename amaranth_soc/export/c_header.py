@@ -1,9 +1,9 @@
 """C header file generator from SoC memory map."""
 
-from amaranth_soc.memory import MemoryMap
+from amaranth_soc.memory import MemoryMap, BARMemoryMap
 
 
-__all__ = ["CHeaderGenerator"]
+__all__ = ["CHeaderGenerator", "generate_bar_header"]
 
 
 class CHeaderGenerator:
@@ -87,3 +87,46 @@ class CHeaderGenerator:
         lines.append("")
         lines.append(f"#endif /* {guard} */")
         return "\n".join(lines)
+
+
+def generate_bar_header(bar_map, *, file_name="bar_regs.h"):
+    """Generate a C header file with BAR-relative register definitions.
+
+    Parameters
+    ----------
+    bar_map : BARMemoryMap
+        The BAR memory map to generate headers for.
+    file_name : str
+        Output file name (for the header guard).
+
+    Returns
+    -------
+    str
+        C header file content.
+    """
+    if not isinstance(bar_map, BARMemoryMap):
+        raise TypeError(f"bar_map must be a BARMemoryMap, not {bar_map!r}")
+
+    guard = file_name.upper().replace(".", "_").replace("/", "_").replace("-", "_")
+    bar_name = bar_map.name.upper()
+
+    lines = []
+    lines.append(f"#ifndef {guard}")
+    lines.append(f"#define {guard}")
+    lines.append("")
+    lines.append(f"/* {bar_map.name} Configuration */")
+    lines.append(f"#define {bar_name}_SIZE  0x{bar_map.size:X}")
+    lines.append(f"#define {bar_name}_INDEX {bar_map.bar_index}")
+    lines.append("")
+    lines.append("/* Register Offsets (BAR-relative) */")
+
+    for resource, name, (start, end) in bar_map.resources():
+        macro_name = "REG_" + "_".join(str(n).upper() for n in name) + "_OFFSET"
+        lines.append(f"#define {macro_name} 0x{start:04X}")
+
+    lines.append("")
+    lines.append("/* Absolute address macro */")
+    lines.append(f"#define {bar_name}_ADDR(base, offset) ((base) + (offset))")
+    lines.append("")
+    lines.append(f"#endif /* {guard} */")
+    return "\n".join(lines)

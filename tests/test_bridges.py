@@ -58,9 +58,14 @@ class TestWishboneToAXI4LiteConstruction(unittest.TestCase):
             WishboneToAXI4Lite(addr_width=30, data_width=16)
 
     def test_invalid_data_width_128(self):
-        """Data width 128 should raise ValueError."""
+        """Data width 128 raises ValueError because Wishbone limits to 8/16/32/64."""
         with self.assertRaises(ValueError):
             WishboneToAXI4Lite(addr_width=30, data_width=128)
+
+    def test_invalid_data_width_not_power_of_2(self):
+        """Data width 48 (not power of 2) should raise ValueError."""
+        with self.assertRaises(ValueError):
+            WishboneToAXI4Lite(addr_width=30, data_width=48)
 
     def test_invalid_granularity(self):
         """Invalid granularity should raise ValueError."""
@@ -141,9 +146,14 @@ class TestAXI4LiteToWishboneConstruction(unittest.TestCase):
             AXI4LiteToWishbone(addr_width=32, data_width=16)
 
     def test_invalid_data_width_128(self):
-        """Data width 128 should raise ValueError."""
+        """Data width 128 raises ValueError because Wishbone limits to 8/16/32/64."""
         with self.assertRaises(ValueError):
             AXI4LiteToWishbone(addr_width=32, data_width=128)
+
+    def test_invalid_data_width_not_power_of_2(self):
+        """Data width 48 (not power of 2) should raise ValueError."""
+        with self.assertRaises(ValueError):
+            AXI4LiteToWishbone(addr_width=32, data_width=48)
 
     def test_invalid_granularity(self):
         """Invalid granularity should raise ValueError."""
@@ -238,10 +248,15 @@ class TestAXI4ToAXI4LiteConstruction(unittest.TestCase):
         with self.assertRaises(ValueError):
             AXI4ToAXI4Lite(addr_width=32, data_width=16)
 
-    def test_invalid_data_width_128(self):
-        """Data width 128 should raise ValueError."""
+    def test_valid_data_width_128(self):
+        """Data width 128 should now be accepted (power of 2 >= 32)."""
+        adapter = AXI4ToAXI4Lite(addr_width=32, data_width=128)
+        self.assertEqual(adapter.data_width, 128)
+
+    def test_invalid_data_width_not_power_of_2(self):
+        """Data width 48 (not power of 2) should raise ValueError."""
         with self.assertRaises(ValueError):
-            AXI4ToAXI4Lite(addr_width=32, data_width=128)
+            AXI4ToAXI4Lite(addr_width=32, data_width=48)
 
     def test_invalid_id_width_negative(self):
         """Negative ID width should raise TypeError."""
