@@ -10,7 +10,7 @@ from amaranth_soc.memory import MemoryMap
 
 from .. import BusStandard
 from ..periph.intc import InterruptController
-from .bus_handler import AXI4LiteBusHandler, WishboneBusHandler
+from .bus_handler import AXI4LiteBusHandler, AXI4BusHandler, WishboneBusHandler
 from .csr_handler import CSRHandler
 from .irq_handler import IRQHandler
 
@@ -41,7 +41,7 @@ class SoCBuilder:
     """
 
     def __init__(self, *, bus_standard, bus_addr_width, bus_data_width,
-                 bus_granularity=None, bus_features=frozenset(),
+                 bus_granularity=None, bus_features=frozenset(), bus_id_width=0,
                  csr_data_width=8, csr_addr_width=14, n_irqs=32):
         if not isinstance(bus_standard, BusStandard):
             raise TypeError(f"bus_standard must be a BusStandard, not {bus_standard!r}")
@@ -55,6 +55,7 @@ class SoCBuilder:
         self._bus_data_width = bus_data_width
         self._bus_granularity = bus_granularity
         self._bus_features = frozenset(bus_features)
+        self._bus_id_width = bus_id_width
         self._csr_data_width = csr_data_width
         self._csr_addr_width = csr_addr_width
         self._n_irqs = n_irqs
@@ -90,6 +91,10 @@ class SoCBuilder:
     @property
     def bus_features(self):
         return self._bus_features
+
+    @property
+    def bus_id_width(self):
+        return self._bus_id_width
 
     @property
     def n_irqs(self):
@@ -352,6 +357,7 @@ class SoC(wiring.Component):
         self._bus_data_width = builder.bus_data_width
         self._bus_granularity = builder.bus_granularity
         self._bus_features = builder.bus_features
+        self._bus_id_width = builder.bus_id_width
         self._csr_data_width = builder.csr_data_width
         self._csr_addr_width = builder.csr_addr_width
         self._n_irqs = builder.n_irqs
@@ -371,6 +377,12 @@ class SoC(wiring.Component):
                 data_width=self._bus_data_width,
                 granularity=self._bus_granularity,
                 features=self._bus_features,
+            )
+        elif self._bus_standard == BusStandard.AXI4:
+            self._bus_handler = AXI4BusHandler(
+                addr_width=self._bus_addr_width,
+                data_width=self._bus_data_width,
+                id_width=self._bus_id_width,
             )
         else:
             raise NotImplementedError(
