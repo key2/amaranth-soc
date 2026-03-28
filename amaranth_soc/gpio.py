@@ -270,6 +270,11 @@ class Peripheral(wiring.Component):
         self._output = regs.add("Output", self.Output(pin_count))
         self._setclr = regs.add("SetClr", self.SetClr(pin_count))
 
+        # Note: This uses the default ownership="owned" pattern where the Bridge
+        # adds registers as submodules. If the peripheral needed to own registers
+        # directly (e.g., to drive read-only fields from internal logic), use
+        # Bridge.from_peripheral() with ownership="external" instead.
+        # See examples/csr_external_ownership.py for a complete example.
         self._bridge = csr.Bridge(regs.as_memory_map())
 
         super().__init__({

@@ -72,7 +72,10 @@ class InterruptController(wiring.Component):
         memory_map.add_resource(self._pending_reg, size=reg_size, name=("pending",))
         memory_map.add_resource(self._enable_reg, size=reg_size, name=("enable",))
 
-        # Use Multiplexer directly (like Bridge pattern)
+        # Use Multiplexer directly (like Bridge pattern).
+        # Alternative: could use csr.Bridge.from_peripheral() which wraps this
+        # pattern and automatically sets ownership="external". See
+        # examples/csr_external_ownership.py for a complete example.
         self._mux = Multiplexer(memory_map)
 
         # Use the original CSR Signature (not the mux's flipped view)

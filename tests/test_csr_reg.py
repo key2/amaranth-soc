@@ -1143,3 +1143,245 @@ class BridgeTestCase(unittest.TestCase):
         sim.add_testbench(testbench)
         with sim.write_vcd(vcd_file="test.vcd"):
             sim.run()
+
+
+class ExternalOwnershipTestCase(unittest.TestCase):
+    """Functional simulation-based tests for the CSR ownership='external' pattern."""
+
+    class _RWRegister(Register, access="rw"):
+        def __init__(self, width, init=0):
+            super().__init__({"control": Field(action.RW, width, init=init)})
+
+    class _RRegister(Register, access="r"):
+        def __init__(self, width):
+            super().__init__({"status": Field(action.R, width)})
+
+    def test_bridge_external_ownership_no_duplicate_elaboratable(self):
+        """Verify that a peripheral can own registers while a Bridge with
+        ownership='external' exposes them, without DuplicateElaboratable."""
+
+        reg_rw = self._RWRegister(8, init=0x00)
+        reg_r  = self._RRegister(8)
+
+        # Peripheral that owns the registers
+        class Peripheral(wiring.Component):
+            def __init__(self, rw_reg, r_reg):
+                self._rw_reg = rw_reg
+                self._r_reg  = r_reg
+                super().__init__({})
+
+            def elaborate(self, platform):
+                m = Module()
+                m.submodules.rw_reg = self._rw_reg
+                m.submodules.r_reg  = self._r_reg
+                # Drive the read-only status field with a constant
+                m.d.comb += self._r_reg.f.status.r_data.eq(0xCD)
+                return m
+
+        peripheral = Peripheral(reg_rw, reg_r)
+
+        # Build memory map with both registers
+        regs = Builder(addr_width=16, data_width=8)
+        regs.add("rw_reg", reg_rw)
+        regs.add("r_reg",  reg_r)
+
+        bridge = Bridge(regs.as_memory_map(), ownership="external")
+
+        # Top-level: both peripheral and bridge coexist
+        top = Module()
+        top.submodules.peripheral = peripheral
+        top.submodules.bridge     = bridge
+
+        async def testbench(ctx):
+            # Just verify elaboration succeeded and we can tick
+            await ctx.tick()
+            await ctx.tick()
+
+        sim = Simulator(top)
+        sim.add_clock(1e-6)
+        sim.add_testbench(testbench)
+        with sim.write_vcd(vcd_file="test.vcd"):
+            sim.run()
+
+    def test_bridge_external_ownership_write_read(self):
+        """Write a value through the CSR bus and read it back, verifying the
+        peripheral can also see the written value through the register field."""
+
+        reg_rw = self._RWRegister(8, init=0x00)
+
+        # Peripheral that owns the register
+        class Peripheral(wiring.Component):
+            def __init__(self, rw_reg):
+                self._rw_reg = rw_reg
+                super().__init__({})
+
+            def elaborate(self, platform):
+                m = Module()
+                m.submodules.rw_reg = self._rw_reg
+                return m
+
+        peripheral = Peripheral(reg_rw)
+
+        regs = Builder(addr_width=16, data_width=8)
+        regs.add("control", reg_rw)
+        bridge = Bridge(regs.as_memory_map(), ownership="external")
+
+        top = Module()
+        top.submodules.peripheral = peripheral
+        top.submodules.bridge     = bridge
+
+        async def testbench(ctx):
+            # Read initial value (should be 0x00)
+            ctx.set(bridge.bus.addr, 0)
+            ctx.set(bridge.bus.r_stb, 1)
+            ctx.set(bridge.bus.w_stb, 0)
+            await ctx.tick()
+            self.assertEqual(ctx.get(bridge.bus.r_data), 0x00)
+            ctx.set(bridge.bus.r_stb, 0)
+
+            # Write 0xAB to the register through the CSR bus
+            ctx.set(bridge.bus.addr, 0)
+            ctx.set(bridge.bus.w_stb, 1)
+            ctx.set(bridge.bus.w_data, 0xAB)
+            await ctx.tick()
+            ctx.set(bridge.bus.w_stb, 0)
+            await ctx.tick()
+
+            # Read back the written value through the CSR bus
+            ctx.set(bridge.bus.addr, 0)
+            ctx.set(bridge.bus.r_stb, 1)
+            await ctx.tick()
+            self.assertEqual(ctx.get(bridge.bus.r_data), 0xAB)
+            ctx.set(bridge.bus.r_stb, 0)
+
+            # Verify the peripheral can see the value through the register field
+            self.assertEqual(ctx.get(reg_rw.f.control.data), 0xAB)
+
+        sim = Simulator(top)
+        sim.add_clock(1e-6)
+        sim.add_testbench(testbench)
+        with sim.write_vcd(vcd_file="test.vcd"):
+            sim.run()
+
+    def test_bridge_external_ownership_peripheral_drives_read_data(self):
+        """Verify that a peripheral-driven read-only register value is
+        correctly returned when read through the CSR bus."""
+
+        reg_r = self._RRegister(8)
+
+        # Peripheral that owns the register and drives its status field
+        class Peripheral(wiring.Component):
+            def __init__(self, r_reg):
+                self._r_reg = r_reg
+                super().__init__({})
+
+            def elaborate(self, platform):
+                m = Module()
+                m.submodules.r_reg = self._r_reg
+                # Drive the status field with a known value
+                m.d.comb += self._r_reg.f.status.r_data.eq(0xBE)
+                return m
+
+        peripheral = Peripheral(reg_r)
+
+        regs = Builder(addr_width=16, data_width=8)
+        regs.add("status", reg_r)
+        bridge = Bridge(regs.as_memory_map(), ownership="external")
+
+        top = Module()
+        top.submodules.peripheral = peripheral
+        top.submodules.bridge     = bridge
+
+        async def testbench(ctx):
+            # Read the register through the CSR bus
+            ctx.set(bridge.bus.addr, 0)
+            ctx.set(bridge.bus.r_stb, 1)
+            await ctx.tick()
+            # The peripheral drives 0xBE into the status field
+            self.assertEqual(ctx.get(bridge.bus.r_data), 0xBE)
+            ctx.set(bridge.bus.r_stb, 0)
+
+        sim = Simulator(top)
+        sim.add_clock(1e-6)
+        sim.add_testbench(testbench)
+        with sim.write_vcd(vcd_file="test.vcd"):
+            sim.run()
+
+    def test_bridge_from_peripheral_write_read(self):
+        """Same as test_bridge_external_ownership_write_read but using
+        Bridge.from_peripheral() convenience method."""
+
+        reg_rw = self._RWRegister(8, init=0x00)
+
+        # Peripheral that owns the register
+        class Peripheral(wiring.Component):
+            def __init__(self, rw_reg):
+                self._rw_reg = rw_reg
+                super().__init__({})
+
+            def elaborate(self, platform):
+                m = Module()
+                m.submodules.rw_reg = self._rw_reg
+                return m
+
+        peripheral = Peripheral(reg_rw)
+
+        bridge = Bridge.from_peripheral(
+            {"control": reg_rw},
+            addr_width=16, data_width=8,
+        )
+
+        top = Module()
+        top.submodules.peripheral = peripheral
+        top.submodules.bridge     = bridge
+
+        async def testbench(ctx):
+            # Read initial value (should be 0x00)
+            ctx.set(bridge.bus.addr, 0)
+            ctx.set(bridge.bus.r_stb, 1)
+            ctx.set(bridge.bus.w_stb, 0)
+            await ctx.tick()
+            self.assertEqual(ctx.get(bridge.bus.r_data), 0x00)
+            ctx.set(bridge.bus.r_stb, 0)
+
+            # Write 0x5A to the register through the CSR bus
+            ctx.set(bridge.bus.addr, 0)
+            ctx.set(bridge.bus.w_stb, 1)
+            ctx.set(bridge.bus.w_data, 0x5A)
+            await ctx.tick()
+            ctx.set(bridge.bus.w_stb, 0)
+            await ctx.tick()
+
+            # Read back the written value through the CSR bus
+            ctx.set(bridge.bus.addr, 0)
+            ctx.set(bridge.bus.r_stb, 1)
+            await ctx.tick()
+            self.assertEqual(ctx.get(bridge.bus.r_data), 0x5A)
+            ctx.set(bridge.bus.r_stb, 0)
+
+            # Verify the peripheral can see the value through the register field
+            self.assertEqual(ctx.get(reg_rw.f.control.data), 0x5A)
+
+            # Verify the bridge was created with external ownership
+            self.assertEqual(bridge.ownership, "external")
+
+        sim = Simulator(top)
+        sim.add_clock(1e-6)
+        sim.add_testbench(testbench)
+        with sim.write_vcd(vcd_file="test.vcd"):
+            sim.run()
+
+    def test_builder_duplicate_register_warning(self):
+        """Verify that adding a register to a second Builder raises a warning
+        about using ownership='external'."""
+
+        reg = self._RWRegister(8)
+
+        builder_a = Builder(addr_width=16, data_width=8)
+        builder_a.add("reg", reg)
+
+        builder_b = Builder(addr_width=16, data_width=8)
+        with self.assertWarns(UserWarning) as cm:
+            builder_b.add("reg", reg)
+
+        self.assertIn("ownership='external'", str(cm.warning))

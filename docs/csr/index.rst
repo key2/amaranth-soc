@@ -28,6 +28,8 @@ The CSR subsystem is organized into several layers:
      - CSR-accessible event monitoring with enable/pending/clear registers.
    * - **Bridges**
      - Protocol bridges from Wishbone and AXI4-Lite to the CSR bus.
+   * - **External Ownership**
+     - Support for registers owned by peripherals, exposed via ``Bridge(ownership="external")``.
 
 .. toctree::
    :maxdepth: 2

@@ -75,6 +75,14 @@ Define a CSR register with typed fields:
                "config": csr.Field(csr.action.RW, 8),
            })
 
+.. tip::
+
+   When a peripheral owns its CSR registers and also needs a :class:`~amaranth_soc.csr.Bridge`
+   to expose them on a bus, use ``Bridge.from_peripheral()`` or
+   ``Bridge(memory_map, ownership="external")`` to avoid ``DuplicateElaboratable`` errors.
+   See :doc:`/csr/registers` for details and ``examples/csr_external_ownership.py`` for a
+   runnable example.
+
 Project Structure
 =================
 

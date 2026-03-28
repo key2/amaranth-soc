@@ -27,7 +27,8 @@
 | **Memory** | `AXI4LiteSRAM`, `AXI4SRAM` (native burst), `WishboneSRAM` |
 | **AXI4 adapters** | `AXIBurst2Beat` — burst address generator, `AXI4ToAXI4Lite` — burst decomposition |
 | **Bridges** | `WishboneToAXI4Lite`, `AXI4LiteToWishbone`, `AXI4LiteCSRBridge`, `BusAdapter` registry |
-| **DMA** | `DMAReader`, `DMAWriter`, `ScatterGatherDMA` — DMA engines with scatter-gather |
+| **DMA** | `DMAReader`, `DMAWriter`, `ScatterGatherDMA` — DMA engines with scatter-gather; `DMABuffering` (configurable-depth FIFOs), `DMADescriptorTable` (scatter-gather descriptor FIFO), `DMADescriptorSplitter` (bus-sized chunking), `DMAReadController` / `DMAWriteController` (bus-agnostic engines), `DMALoopback` (test plugin), `DMASynchronizer` (sync-gated flow) |
+| **Utils** | `WaitTimer` — configurable countdown/timeout; `add_reset_domain()` — Amaranth equivalent of LiteX ResetInserter |
 | **Peripherals** | `TimerPeripheral`, `InterruptController`, `MSIController`, GPIO, UART |
 | **CPU wrappers** | `CPUWrapper`, `AXICPUWrapper`, `WishboneCPUWrapper`, `VexRiscvCPU` |
 | **SoC builder** | `SoCBuilder` / `SoC` — bus-agnostic configuration with DMA, BAR mapping, auto bridges |
@@ -160,7 +161,18 @@ Bridges
 DMA
 ├── DMAReader                               (read engine with FIFO)
 ├── DMAWriter                               (write engine with FIFO)
-└── ScatterGatherDMA                        (descriptor-based DMA)
+├── ScatterGatherDMA                        (descriptor-based DMA)
+├── DMABuffering                            (configurable-depth FIFOs for data paths)
+├── DMADescriptorTable                      (scatter-gather descriptor FIFO)
+├── DMADescriptorSplitter                   (splits descriptors into bus-sized chunks)
+├── DMAReadController                       (bus-agnostic DMA read engine)
+├── DMAWriteController                      (bus-agnostic DMA write engine)
+├── DMALoopback                             (testing plugin: reader→writer loopback)
+└── DMASynchronizer                         (sync-gated data flow control)
+
+Utils
+├── WaitTimer                               (configurable countdown/timeout)
+└── add_reset_domain()                      (resettable clock domain helper)
 
 Peripherals
 ├── TimerPeripheral                         (countdown timer + CSR)
@@ -866,6 +878,81 @@ When `data_width > csr_bus.data_width`, each AXI4-Lite transaction maps to multi
 - Each AXI read performs 4 consecutive CSR read beats and assembles the result.
 - Latency: `data_width // csr_data_width + 1` cycles.
 
+#### External Register Ownership
+
+When a peripheral creates and owns its own CSR registers, use `ownership="external"` on the `csr.Bridge` to avoid `DuplicateElaboratable` errors. By default, `Bridge` adds each register as a submodule during elaboration. If the peripheral also adds those same registers (which it must, to wire their field ports), Amaranth raises a `DuplicateElaboratable` error.
+
+**Recommended: `Bridge.from_peripheral()`**
+
+The convenience class method `Bridge.from_peripheral()` creates a `Builder`, adds the registers, and returns a `Bridge` with `ownership="external"` in a single call:
+
+```python
+from amaranth import *
+from amaranth.lib import wiring
+from amaranth.lib.wiring import In, Out, connect, flipped
+
+from amaranth_soc import csr
+from amaranth_soc.csr import action as csr_action
+from amaranth_soc.csr.wishbone import WishboneCSRBridge
+
+
+class ControlReg(csr.Register, access="rw"):
+    def __init__(self):
+        super().__init__({
+            "enable":  csr.Field(csr_action.RW, 1),
+            "mode":    csr.Field(csr_action.RW, 2),
+        })
+
+
+class StatusReg(csr.Register, access="r"):
+    def __init__(self):
+        super().__init__({
+            "busy":  csr.Field(csr_action.R, 1),
+            "error": csr.Field(csr_action.R, 1),
+        })
+
+
+class MyPeripheral(wiring.Component):
+    def __init__(self, *, csr_data_width=8):
+        self._ctrl = ControlReg()
+        self._status = StatusReg()
+
+        # One-liner: builds memory map + bridge with external ownership
+        self._bridge = csr.Bridge.from_peripheral(
+            {"Control": self._ctrl, "Status": self._status},
+            addr_width=8,
+            data_width=csr_data_width,
+        )
+
+        # Optionally wrap with a Wishbone-to-CSR bridge
+        self._wb_bridge = WishboneCSRBridge(self._bridge.bus, data_width=32)
+
+        super().__init__({
+            "bus": Out(self._wb_bridge.wb_bus.signature),
+        })
+
+    def elaborate(self, platform):
+        m = Module()
+        # Peripheral owns its registers
+        m.submodules.ctrl = self._ctrl
+        m.submodules.status = self._status
+        # Bridge does NOT add them again (ownership="external")
+        m.submodules.bridge = self._bridge
+        m.submodules.wb_bridge = self._wb_bridge
+        connect(m, flipped(self.bus), self._wb_bridge.wb_bus)
+        return m
+```
+
+**`Bridge.from_peripheral()` parameters:**
+- `registers` (`dict[str, Register]`) — Mapping of register names to `Register` objects.
+- `addr_width` (`int`) — CSR bus address width.
+- `data_width` (`int`, default `8`) — CSR bus data width.
+- `register_addr` (`dict[str, int]` or `None`) — Optional explicit addresses per register.
+- `register_alignment` (`int` or `None`) — Optional address alignment.
+- `name` (`str` or `None`) — Optional bridge name.
+
+> **Note:** If a register is added to multiple `Builder` instances, a warning is emitted suggesting the use of `ownership="external"`. This is expected when register objects are shared between a peripheral's internal builder and an external bridge builder.
+
 ---
 
 ### DMA Infrastructure
@@ -898,6 +985,82 @@ Defined in [`dma/scatter_gather.py`](amaranth_soc/dma/scatter_gather.py). Scatte
 from amaranth_soc.dma import ScatterGatherDMA
 
 sg_dma = ScatterGatherDMA(addr_width=32, data_width=32, max_descriptors=16)
+```
+
+#### `DMABuffering`
+
+Defined in [`dma/buffering.py`](amaranth_soc/dma/buffering.py). Configurable-depth FIFOs for reader/writer data paths with CSR-controlled dynamic depth and watermark reporting.
+
+```python
+from amaranth_soc.dma.buffering import DMABuffering
+```
+
+#### `DMADescriptorTable`
+
+Defined in [`dma/descriptor_table.py`](amaranth_soc/dma/descriptor_table.py). Software-programmable scatter-gather descriptor FIFO with Prog and Loop modes.
+
+```python
+from amaranth_soc.dma.descriptor_table import DMADescriptorTable
+```
+
+#### `DMADescriptorSplitter`
+
+Defined in [`dma/splitter.py`](amaranth_soc/dma/splitter.py). Splits large DMA descriptors into bus-sized chunks with user_id tracking.
+
+```python
+from amaranth_soc.dma.splitter import DMADescriptorSplitter
+```
+
+#### `DMAReadController`
+
+Defined in [`dma/read_controller.py`](amaranth_soc/dma/read_controller.py). Bus-agnostic DMA read engine that consumes split descriptors and generates bus read requests.
+
+```python
+from amaranth_soc.dma.read_controller import DMAReadController
+```
+
+#### `DMAWriteController`
+
+Defined in [`dma/write_controller.py`](amaranth_soc/dma/write_controller.py). Bus-agnostic DMA write engine with data buffering and early termination support.
+
+```python
+from amaranth_soc.dma.write_controller import DMAWriteController
+```
+
+#### `DMALoopback`
+
+Defined in [`dma/loopback.py`](amaranth_soc/dma/loopback.py). Testing plugin that connects DMA reader output directly to writer input when enabled via CSR.
+
+```python
+from amaranth_soc.dma.loopback import DMALoopback
+```
+
+#### `DMASynchronizer`
+
+Defined in [`dma/synchronizer.py`](amaranth_soc/dma/synchronizer.py). Gates DMA data flow until an external sync event (e.g., PPS for SDR applications).
+
+```python
+from amaranth_soc.dma.synchronizer import DMASynchronizer
+```
+
+---
+
+### Utilities
+
+#### `WaitTimer`
+
+Defined in [`utils/wait_timer.py`](amaranth_soc/utils/wait_timer.py). Configurable countdown/timeout component.
+
+```python
+from amaranth_soc.utils.wait_timer import WaitTimer
+```
+
+#### `add_reset_domain()`
+
+Defined in [`utils/reset_inserter.py`](amaranth_soc/utils/reset_inserter.py). Amaranth equivalent of LiteX `ResetInserter` — creates resettable clock domains.
+
+```python
+from amaranth_soc.utils.reset_inserter import add_reset_domain
 ```
 
 ---
@@ -1646,6 +1809,12 @@ if __name__ == "__main__":
     demo_burst_adapter()
 ```
 
+### Example 8: CSR External Ownership Pattern
+
+Runnable simulation demonstrating the `Bridge(ownership="external")` pattern for peripherals that own their own CSR registers.
+
+See [`examples/csr_external_ownership.py`](examples/csr_external_ownership.py) for the full runnable example.
+
 ---
 
 ## Testing
@@ -1670,7 +1839,7 @@ cd amaranth-soc && pdm run pytest tests/test_axi_sram.py -v
 
 ### Test Coverage Summary
 
-**860 tests across 34 test files:**
+**~900+ tests across 36 test files:**
 
 | Test File | Tests | Coverage |
 |-----------|------:|---------|
@@ -1693,6 +1862,8 @@ cd amaranth-soc && pdm run pytest tests/test_axi_sram.py -v
 | `test_bar_memory.py` | 24 | BAR-relative memory map |
 | `test_event.py` | 23 | Event handling |
 | `test_dma.py` | 21 | DMA reader, writer, scatter-gather |
+| `test_dma_controllers.py` | ~35 | DMA buffering, descriptor table, splitter, read/write controllers, loopback, synchronizer (560 lines) |
+| `test_utils.py` | ~15 | WaitTimer and add_reset_domain utilities (199 lines) |
 | `test_axi_burst.py` | 21 | Burst-to-beat address generator |
 | `test_stubs.py` | 18 | All stub files have content |
 | `test_bus_adapter.py` | 18 | Bridge registry |
@@ -1734,7 +1905,8 @@ See [`STATUS.md`](STATUS.md) for a detailed breakdown of all implemented files a
 - ✅ Wishbone ↔ AXI4-Lite bidirectional bridges
 - ✅ AXI4-Lite → CSR and Wishbone → CSR bridges
 - ✅ Automatic bridge selection registry (`BusAdapter`) with two-hop chains
-- ✅ DMA infrastructure: reader, writer, scatter-gather
+- ✅ DMA infrastructure: reader, writer, scatter-gather, buffering, descriptor table, splitter, read/write controllers, loopback, synchronizer
+- ✅ Utility modules: WaitTimer, add_reset_domain (ResetInserter equivalent)
 - ✅ Timer peripheral and enhanced interrupt controller with CSR interfaces
 - ✅ MSI/MSI-X interrupt controller
 - ✅ CPU wrappers (abstract, AXI, Wishbone, VexRiscv)

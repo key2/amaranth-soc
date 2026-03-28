@@ -1,3 +1,4 @@
+import warnings
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 try:
@@ -674,6 +675,13 @@ class Builder:
         """
         if not isinstance(reg, Register):
             raise TypeError(f"Register must be an instance of csr.Register, not {reg!r}")
+        if hasattr(reg, '_csr_builder_ref') and reg._csr_builder_ref is not self:
+            warnings.warn(
+                f"Register '{name}' is already added to another Builder. "
+                f"Use ownership='external' in Bridge to avoid DuplicateElaboratable.",
+                stacklevel=2
+            )
+        reg._csr_builder_ref = self
         if self._frozen:
             raise ValueError(f"Builder is frozen. Cannot add register {reg!r}")
 
@@ -761,14 +769,26 @@ class Builder:
 class Bridge(wiring.Component):
     """CSR bridge.
 
+    A bridge between a CSR bus and a set of CSR registers described by a memory map.
+
     Parameters
     ----------
     memory_map : :class:`MemoryMap`
         Memory map of CSR registers.
     ownership : :class:`str`
-        Register ownership mode. ``"owned"`` (default) causes the bridge to add each register as
-        a submodule during elaboration. ``"external"`` skips submodule addition, leaving the caller
-        responsible for elaborating the registers elsewhere.
+        Register ownership mode. Defaults to ``"owned"``.
+
+        ``"owned"``
+            The bridge adds each register as a submodule during elaboration.
+            Use this when the bridge is the sole owner of the registers (e.g.
+            registers created directly by the bridge or builder).
+
+        ``"external"``
+            The bridge does **not** add registers as submodules. The caller is
+            responsible for elaborating the registers elsewhere (e.g. inside a
+            peripheral that already owns them). This avoids
+            ``DuplicateElaboratable`` errors when the same :class:`Register`
+            object is used by both a peripheral and a bridge.
 
     Interface attributes
     --------------------
@@ -785,6 +805,31 @@ class Bridge(wiring.Component):
         If ``memory_map`` has resources that are not :class:`Register` objects.
     :exc:`ValueError`
         If ``ownership`` is not ``"owned"`` or ``"external"``.
+
+    Examples
+    --------
+    Using ``ownership="external"`` for registers owned by a peripheral::
+
+        # Inside a peripheral that owns its registers:
+        class MyPeripheral(wiring.Component):
+            def __init__(self):
+                self.reg1 = Register(...)
+                self.reg2 = Register(...)
+                # Build a bridge with external ownership
+                self.bridge = Bridge.from_peripheral(
+                    {"reg1": self.reg1, "reg2": self.reg2},
+                    addr_width=8, data_width=8,
+                )
+                super().__init__(...)
+
+            def elaborate(self, platform):
+                m = Module()
+                # The peripheral adds its own registers as submodules
+                m.submodules.reg1 = self.reg1
+                m.submodules.reg2 = self.reg2
+                # The bridge does NOT add them again (ownership="external")
+                m.submodules.bridge = self.bridge
+                return m
     """
     def __init__(self, memory_map, *, ownership="owned"):
         if ownership not in ("owned", "external"):
@@ -806,6 +851,49 @@ class Bridge(wiring.Component):
                                 data_width=memory_map.data_width))
         })
         self.bus.memory_map = memory_map
+
+    @classmethod
+    def from_peripheral(cls, registers, *, addr_width, data_width=8, register_addr=None,
+                        register_alignment=None, name=None):
+        """Create a Bridge for registers owned by an external peripheral.
+
+        This is a convenience method for the common pattern where a peripheral
+        creates and owns its own CSR registers, and a separate Bridge is used
+        to expose them to a bus. It automatically sets ``ownership="external"``
+        to avoid ``DuplicateElaboratable`` errors.
+
+        Parameters
+        ----------
+        registers : dict[str, Register]
+            A mapping of register names to Register objects owned by the peripheral.
+        addr_width : int
+            Address width of the CSR bus.
+        data_width : int
+            Data width of the CSR bus. Defaults to 8.
+        register_addr : dict[str, int] or None
+            Optional mapping of register names to explicit addresses.
+        register_alignment : int or None
+            Optional alignment for register addresses.
+        name : str or None
+            Optional name for the Bridge.
+
+        Returns
+        -------
+        Bridge
+            A Bridge instance with ``ownership="external"``.
+        """
+        builder = Builder(addr_width=addr_width, data_width=data_width)
+        for reg_name, reg in registers.items():
+            addr = None
+            if register_addr is not None and reg_name in register_addr:
+                addr = register_addr[reg_name]
+            builder.add(reg_name, reg, offset=addr)
+        kwargs = {}
+        if register_alignment is not None:
+            kwargs["register_alignment"] = register_alignment
+        if name is not None:
+            kwargs["name"] = name
+        return cls(builder.as_memory_map(), ownership="external", **kwargs)
 
     @property
     def ownership(self):
